@@ -14,6 +14,7 @@ import plotly.graph_objects as go
 import numpy as np
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 st.set_page_config(page_title="Dynamic Topic Modeling & Stance Analysis", layout="wide")
 
@@ -826,24 +827,45 @@ if uploaded_file:
             # ========== TOPIC MODELING ==========
             topic_modeling_start = time.time()
             st.subheader("📊 Topic Modeling Processing")
-            
+
             with st.container():
-                # Progress 1: Model Initialization
                 progress_bar = st.progress(0.0)
                 status_text = st.empty()
-                
-                status_text.info("🔄 Tahap 1/4: Menginisialisasi BERTopic model...")
+                checklist_placeholder = st.empty()
+                sub_status = st.empty()
+
+                stage_messages = [
+                    "Memulai inisialisasi model...",
+                    "Menyiapkan embedding dan clustering...",
+                    "Menghitung evolution topics over time...",
+                    "Menyelesaikan proses topic modeling..."
+                ]
+
+                def render_checklist(current_stage):
+                    items = [
+                        (1, "Tahap 1: Inisialisasi Model"),
+                        (2, "Tahap 2: Fit-Transform"),
+                        (3, "Tahap 3: Topics Over Time"),
+                        (4, "Tahap 4: Selesai")
+                    ]
+                    lines = []
+                    for stage, label in items:
+                        icon = "✅" if stage < current_stage else "🔄" if stage == current_stage else "⏳"
+                        lines.append(f"{icon} {label}")
+                    checklist_placeholder.markdown("\n".join(lines))
+
+                render_checklist(1)
+                status_text.info(f"🔄 {stage_messages[0]}")
                 progress_bar.progress(0.1)
+
                 logging.info("Initializing BERTopic model")
                 topic_model = BERTopic(embedding_model=embedding_model)
                 st.session_state['topic_model'] = topic_model
                 st.toast("✅ BERTopic model initialized", icon="🤖")
-                
-                # Progress 2: Fitting & Transforming
-                status_text.info("🔄 Tahap 2/4: Embedding dan clustering dokumen (ini mungkin memakan waktu beberapa menit)...")
+
+                render_checklist(2)
+                status_text.info(f"🔄 {stage_messages[1]}")
                 progress_bar.progress(0.25)
-                
-                # Show what's happening
                 with st.expander("📝 Detil Proses Fit-Transform", expanded=True):
                     process_steps = {
                         "1️⃣ Embedding": "Mengkonversi teks menjadi vector embeddings menggunakan model SBERT",
@@ -854,56 +876,60 @@ if uploaded_file:
                     }
                     for step, desc in process_steps.items():
                         st.markdown(f"**{step}**: {desc}")
-                
+
                 st.markdown("---")
-                
-                # Create metric placeholders
                 col1, col2, col3, col4 = st.columns(4)
                 with col1:
                     total_docs_metric = st.empty()
                     total_docs_metric.metric("📚 Total Dokumen", f"{len(docs):,}")
                 with col2:
                     status_metric = st.empty()
-                    status_metric.metric("Status", "Embedding...")
+                    status_metric.metric("Status", "Fit-Transform")
                 with col3:
                     topics_metric = st.empty()
                     topics_metric.metric("🏷️ Topik", "Detecting...")
                 with col4:
                     time_metric = st.empty()
-                    time_metric.metric("⏱️ Progress", "0%")
-                
-                # Jalankan actual fit_transform
-                fit_start = time.time()
-                topics, probs = cached_fit_transform(topic_model, docs)
-                fit_duration = time.time() - fit_start
-                
-                # Update metrics
-                st.session_state['topic_model'] = topic_model
+                    time_metric.metric("⏱️ Estimasi", "estimating...")
+
+                fit_future = ThreadPoolExecutor(max_workers=1).submit(cached_fit_transform, topic_model, docs)
+                spinner_chars = ["|", "/", "-", "\\"]
+                loop_start = time.time()
+                while not fit_future.done():
+                    elapsed = time.time() - loop_start
+                    spinner = spinner_chars[int(elapsed * 4) % len(spinner_chars)]
+                    sub_status.markdown(f"**Status Saat Ini:** Menghitung embeddings dan cluster {spinner}")
+                    progress_bar.progress(min(0.25 + elapsed / 60 * 0.35, 0.6))
+                    time_metric.metric("⏱️ Estimasi", f"{int(elapsed)}s elapsed")
+                    time.sleep(0.2)
+
+                topics, probs = fit_future.result()
+                fit_duration = time.time() - loop_start
                 posts_df['Topik'] = topics
                 num_topics = len(set(topics)) - (1 if -1 in set(topics) else 0)
-                
+
                 total_docs_metric.metric("📚 Total Dokumen", f"{len(docs):,}")
                 status_metric.metric("Status", "Fit-Transform ✓")
                 topics_metric.metric("🏷️ Topik", f"{num_topics}")
                 time_metric.metric("⏱️ Waktu", f"{fit_duration:.1f}s")
-                
-                st.toast(f"✅ Fit-transform selesai! {num_topics} topik ditemukan dalam {fit_duration:.1f}s", icon="📊")
-                
-                # Progress 3: Topics Over Time
-                st.markdown("---")
-                status_text.info("🔄 Tahap 3/4: Menghitung evolusi topik seiring waktu...")
-                progress_bar.progress(0.75)
-                
+                sub_status.success(f"✅ Fit-transform selesai dalam {fit_duration:.1f}s")
+                progress_bar.progress(0.65)
+                st.toast(f"✅ Fit-transform selesai! {num_topics} topik ditemukan", icon="📊")
+
+                render_checklist(3)
+                status_text.info(f"🔄 {stage_messages[2]}")
+                progress_bar.progress(0.7)
                 tot_start = time.time()
                 logging.info("Calculating topics over time")
                 topics_over_time = cached_topics_over_time(topic_model, docs, timestamps, _nr_bins=20)
                 tot_duration = time.time() - tot_start
-                
-                st.toast(f"✅ Topics over time calculated dalam {tot_duration:.1f}s", icon="📈")
-                
-                # Progress 4: Complete
+                st.toast(f"✅ Topics over time selesai dalam {tot_duration:.1f}s", icon="📈")
+                progress_bar.progress(0.9)
+
+                render_checklist(4)
                 total_duration = time.time() - topic_modeling_start
-                status_text.success(f"✅ Tahap 4/4: Topic Modeling Selesai! (Total: {total_duration:.1f}s)")
+                status_text.success(f"✅ Tahap 4/4: Topic Modeling Selesai! Total {total_duration:.1f}s")
+                sub_status.markdown(f"**Ringkasan:** {num_topics} topik terdeteksi, topik evolusi siap ditampilkan")
                 progress_bar.progress(1.0)
                 st.toast(f"🎉 Topic modeling selesai! Total waktu: {total_duration:.1f}s", icon="🎉")
 
@@ -1074,36 +1100,29 @@ if uploaded_file:
             
             logging.info(f"Starting stance analysis on {len(comments_list)} comments with batch size {batch_size}")
             
-            # Container for stance analysis progress
             stance_analysis_container = st.container()
             
             with stance_analysis_container:
                 st.subheader("🗣️ Stance Analysis pada Komentar")
                 
-                # Initialize progress components
                 progress_bar = st.progress(0, text="🔄 Memulai analisis stance...")
                 progress_metrics = st.columns([1, 1, 1, 1])
                 status_message = st.empty()
                 tips_placeholder = st.empty()
                 
-                # Progress metrics
                 with progress_metrics[0]:
                     total_metric = st.empty()
                     total_metric.metric("📝 Total Komentar", f"{len(comments_list):,}")
-                
                 with progress_metrics[1]:
                     processed_metric = st.empty()
                     processed_metric.metric("✓ Dianalisis", "0")
-                
                 with progress_metrics[2]:
                     progress_perc_metric = st.empty()
                     progress_perc_metric.metric("Progress", "0%")
-                
                 with progress_metrics[3]:
                     batch_metric = st.empty()
                     batch_metric.metric("🔄 Batch", "0/0")
                 
-                # Tips messages
                 tips_messages = [
                     "🤖 Model sedang menganalisis sentimen pro, netral, dan kontra...",
                     "📊 Mendeteksi opini masyarakat terhadap kebijakan luar negeri...",
@@ -1115,51 +1134,54 @@ if uploaded_file:
                 comments_df['sentiment'] = None
                 comments_df['confidence'] = None
                 
-                # Perform stance analysis
                 with st.spinner('🤖 Sedang membedah opini masyarakat...'):
-                    import time
                     start_time = time.time()
-                    sentiments, confidences = cached_stance_analysis(sentiment_model, comments_list, batch_size)
-                    
-                    # Update UI with actual batch progress
-                    total_batches = (len(comments_list) + batch_size - 1) // batch_size
+                    total_comments = len(comments_list)
+                    total_batches = (total_comments + batch_size - 1) // batch_size
+                    batch_results = []
+                    batch_confidences = []
                     
                     for batch_num in range(total_batches):
                         start_idx = batch_num * batch_size
-                        end_idx = min((batch_num + 1) * batch_size, len(comments_list))
-                        processed = end_idx
+                        end_idx = min((batch_num + 1) * batch_size, total_comments)
+                        batch = comments_list[start_idx:end_idx]
                         
-                        # Calculate progress
-                        progress = processed / len(comments_list)
+                        sentiments_batch = sentiment_model(batch)
+                        for sentiment in sentiments_batch:
+                            label = sentiment['label']
+                            confidence = sentiment['score']
+                            if confidence < 0.7 and label != 'NEUTRAL':
+                                label = 'NEUTRAL'
+                            batch_results.append(label)
+                            batch_confidences.append(confidence)
+                        
+                        processed = end_idx
+                        progress = processed / total_comments
                         percent = int(progress * 100)
                         
-                        # Update metrics
                         processed_metric.metric("✓ Dianalisis", f"{processed:,}")
                         progress_perc_metric.metric("Progress", f"{percent}%")
                         batch_metric.metric("🔄 Batch", f"{batch_num + 1}/{total_batches}")
-                        progress_bar.progress(progress, text=f"🔄 Menganalisis {processed}/{len(comments_list)} komentar ({percent}%)...")
+                        progress_bar.progress(progress, text=f"🔄 Menganalisis {processed}/{total_comments} komentar ({percent}%)...")
                         
-                        # Update tips based on progress
                         tip_idx = min(int(progress * len(tips_messages)), len(tips_messages) - 1)
                         tips_placeholder.info(tips_messages[tip_idx])
-                
-                # Final updates
-                elapsed_time = time.time() - start_time
-                progress_bar.progress(1.0, text="✅ Analisis stance selesai!")
-                processed_metric.metric("✓ Dianalisis", f"{len(comments_list):,}")
-                progress_perc_metric.metric("Progress", "100%")
-                batch_metric.metric("⏱️ Waktu", f"{elapsed_time:.1f}s")
-                status_message.success("✅ Analisis Stance Selesai!")
-                tips_placeholder.empty()
-                st.toast(f'✅ Stance analysis selesai! ({len(comments_list):,} komentar dalam {elapsed_time:.1f}s)', icon='✅')
-                
-                # Assign results to dataframe
-                for i in range(len(sentiments)):
-                    comments_df.loc[i, 'sentiment'] = sentiments[i]
-                    comments_df.loc[i, 'confidence'] = confidences[i]
-                
-                logging.info(f"Completed stance analysis in {elapsed_time:.1f}s")
-                st.success("✅ Analisis Stance Selesai!")
+                        
+                    elapsed_time = time.time() - start_time
+                    progress_bar.progress(1.0, text="✅ Analisis stance selesai!")
+                    processed_metric.metric("✓ Dianalisis", f"{total_comments:,}")
+                    progress_perc_metric.metric("Progress", "100%")
+                    batch_metric.metric("⏱️ Waktu", f"{elapsed_time:.1f}s")
+                    status_message.success("✅ Analisis Stance Selesai!")
+                    tips_placeholder.empty()
+                    st.toast(f'✅ Stance analysis selesai! ({total_comments:,} komentar dalam {elapsed_time:.1f}s)', icon='✅')
+                    
+                    for i in range(len(batch_results)):
+                        comments_df.loc[i, 'sentiment'] = batch_results[i]
+                        comments_df.loc[i, 'confidence'] = batch_confidences[i]
+                    
+                    logging.info(f"Completed stance analysis in {elapsed_time:.1f}s")
+                    st.success("✅ Analisis Stance Selesai!")
             
             st.subheader("📋 Hasil Stance Analysis (20 Data Teratas)")
             st.dataframe(filtered_comments_df.head(20), use_container_width=True)
