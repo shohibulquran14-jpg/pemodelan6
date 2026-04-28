@@ -309,24 +309,37 @@ def preprocess_dataframe(df, text_column):
     logging.info(f"Starting preprocess_dataframe with {len(df)} rows, column: {text_column}")
     progress_bar = st.progress(0.0)
     status_text = st.empty()
+    time_info = st.empty()
     
     preprocessed_texts = []
     total = len(df)
+    
+    import time
+    start_time = time.time()
     
     for idx, text in enumerate(df[text_column]):
         preprocessed = preprocess_text(text)
         preprocessed_texts.append(preprocessed)
         
-        # Update progress setiap 10 item
-        if (idx + 1) % max(1, total // 20) == 0:
+        # Update progress setiap 10 item atau di akhir
+        if (idx + 1) % max(1, total // 20) == 0 or idx == total - 1:
             progress = int((idx + 1) / total * 100)
             progress_bar.progress(progress / 100)
+            elapsed = time.time() - start_time
+            avg_time_per_item = elapsed / (idx + 1)
+            remaining_items = total - (idx + 1)
+            estimated_remaining = avg_time_per_item * remaining_items
+            
             status_text.text(f"Preprocessing... {idx + 1}/{total} ({progress}%)")
+            time_info.caption(f"⏱️ Elapsed: {elapsed:.1f}s | Est. Remaining: {estimated_remaining:.1f}s")
     
     progress_bar.progress(1.0)
+    total_time = time.time() - start_time
     status_text.text("✅ Preprocessing selesai!")
+    time_info.caption(f"⏱️ Total waktu: {total_time:.1f}s")
+    st.toast(f'✅ Preprocessing selesai! ({len(preprocessed_texts)} items)', icon='✅')
     
-    logging.info(f"Completed preprocess_dataframe: processed {len(preprocessed_texts)} texts")
+    logging.info(f"Completed preprocess_dataframe: processed {len(preprocessed_texts)} texts in {total_time:.1f}s")
     return preprocessed_texts
 
 def convert_df_to_csv(df):
@@ -721,9 +734,30 @@ if uploaded_file:
             comment_cols.append('expert_stance')
         comments_df = df[comment_cols].dropna(subset=['full_text_comments'])
 
-        st.info("Memuat model...")
-        embedding_model = load_embedding_model()
-        sentiment_model = load_sentiment_model()
+        # Enhanced model loading with progress feedback
+        st.subheader("⚙️ Memuat Model AI")
+        
+        models_progress = st.progress(0, text="🤖 Memulai loading model...")
+        models_status = st.empty()
+        
+        try:
+            models_status.info("Loading embedding model (all-MiniLM-L6-v2)...")
+            models_progress.progress(33, text="Tahap 1/3: Loading Embedding Model...")
+            embedding_model = load_embedding_model()
+            models_status.success("✅ Embedding Model Loaded")
+            
+            models_status.info("Loading sentiment model (IndoBERT)...")
+            models_progress.progress(66, text="Tahap 2/3: Loading Sentiment Model...")
+            sentiment_model = load_sentiment_model()
+            models_status.success("✅ Sentiment Model Loaded")
+            
+            models_progress.progress(100, text="✅ Semua Model Siap!")
+            st.toast("🎉 Model loading completed!", icon="✅")
+            time.sleep(0.5)
+            models_status.empty()
+        except Exception as e:
+            st.error(f"❌ Error loading models: {str(e)}")
+            st.stop()
         
         # ========== PREPROCESSING SECTION ==========
         st.divider()
@@ -790,147 +824,88 @@ if uploaded_file:
             df.to_csv(os.path.join(results_dir, f"original_data_{timestamp}.csv"), index=False)
             
             # ========== TOPIC MODELING ==========
+            topic_modeling_start = time.time()
             st.subheader("📊 Topic Modeling Processing")
-            progress_container = st.container()
             
-            with progress_container:
+            with st.container():
                 # Progress 1: Model Initialization
                 progress_bar = st.progress(0.0)
                 status_text = st.empty()
                 
-                status_text.text("🔄 Tahap 1/4: Inisialisasi Model...")
-                progress_bar.progress(0.25)
+                status_text.info("🔄 Tahap 1/4: Menginisialisasi BERTopic model...")
+                progress_bar.progress(0.1)
                 logging.info("Initializing BERTopic model")
                 topic_model = BERTopic(embedding_model=embedding_model)
-                
-                # Store model in session state immediately
                 st.session_state['topic_model'] = topic_model
+                st.toast("✅ BERTopic model initialized", icon="🤖")
                 
-                # Progress 2: Fitting & Transforming with detailed progress
+                # Progress 2: Fitting & Transforming
+                status_text.info("🔄 Tahap 2/4: Embedding dan clustering dokumen (ini mungkin memakan waktu beberapa menit)...")
+                progress_bar.progress(0.25)
+                
+                # Show what's happening
+                with st.expander("📝 Detil Proses Fit-Transform", expanded=True):
+                    process_steps = {
+                        "1️⃣ Embedding": "Mengkonversi teks menjadi vector embeddings menggunakan model SBERT",
+                        "2️⃣ Dimensionality Reduction": "Mengurangi dimensi menggunakan UMAP untuk efisiensi",
+                        "3️⃣ Clustering": "Mengelompokkan dokumen serupa dengan algoritma HDBSCAN",
+                        "4️⃣ Topic Extraction": "Mengekstrak topik representatif dari setiap cluster",
+                        "5️⃣ Topic Labeling": "Membuat label informatif untuk setiap topik"
+                    }
+                    for step, desc in process_steps.items():
+                        st.markdown(f"**{step}**: {desc}")
+                
                 st.markdown("---")
-                st.subheader("🔄 Tahap 2/4: Fitting dan Transforming Dokumen")
                 
-                # Create detailed progress metrics
+                # Create metric placeholders
                 col1, col2, col3, col4 = st.columns(4)
-                
                 with col1:
                     total_docs_metric = st.empty()
                     total_docs_metric.metric("📚 Total Dokumen", f"{len(docs):,}")
-                
                 with col2:
-                    processed_metric = st.empty()
-                    processed_metric.metric("✓ Diproses", "0")
-                
-                with col3:
-                    progress_perc_metric = st.empty()
-                    progress_perc_metric.metric("% Progress", "0%")
-                
-                with col4:
                     status_metric = st.empty()
-                    status_metric.metric("Status", "Memulai...")
-                
-                # Main progress bar
-                main_progress_bar = st.progress(0.0)
-                sub_progress_bar = st.progress(0.0)
-                detail_text = st.empty()
-                time_info = st.empty()
-                
-                import time
-                start_time = time.time()
-                
-                # Simulate progress dengan milestone
-                milestones = [10, 25, 50, 75, 90, 100]
-                last_milestone = 0
-                
-                detail_text.write("""
-                <div style="padding: 10px; background-color: #f0f2f6; border-radius: 5px;">
-                    <small><b>📝 Sub-tahap:</b></small><br>
-                    <small>• Embedding documents...</small>
-                </div>
-                """, unsafe_allow_html=True)
-                
-                # Tahap 2A: Embedding (30% dari tahap 2)
-                for i in range(30):
-                    processed_metric.metric("✓ Diproses", f"{len(docs) // 100 * (i+1):,}")
-                    progress_perc_metric.metric("% Progress", f"{((i+1)/100)*50:.1f}%")
-                    main_progress_bar.progress((25 + (i+1)/100 * 25) / 100)
-                    sub_progress_bar.progress((i+1)/100)
-                    elapsed = time.time() - start_time
-                    time_info.write(f"⏱️ Waktu elapsed: {elapsed:.1f}s")
-                    time.sleep(0.05)
-                
-                detail_text.write("""
-                <div style="padding: 10px; background-color: #f0f2f6; border-radius: 5px;">
-                    <small><b>📝 Sub-tahap:</b></small><br>
-                    <small>• Embedding documents... ✓</small><br>
-                    <small>• Clustering & reducing dimensions...</small>
-                </div>
-                """, unsafe_allow_html=True)
-                
-                # Tahap 2B: Clustering & UMAP (40% dari tahap 2)
-                for i in range(30, 70):
-                    processed_metric.metric("✓ Diproses", f"{len(docs) // 100 * (i+1):,}")
-                    progress_perc_metric.metric("% Progress", f"{((i+1)/100)*50:.1f}%")
-                    main_progress_bar.progress((25 + (i+1)/100 * 25) / 100)
-                    sub_progress_bar.progress((i+1-30)/70)
-                    elapsed = time.time() - start_time
-                    time_info.write(f"⏱️ Waktu elapsed: {elapsed:.1f}s")
-                    time.sleep(0.05)
-                
-                detail_text.write("""
-                <div style="padding: 10px; background-color: #f0f2f6; border-radius: 5px;">
-                    <small><b>📝 Sub-tahap:</b></small><br>
-                    <small>• Embedding documents... ✓</small><br>
-                    <small>• Clustering & reducing dimensions... ✓</small><br>
-                    <small>• Topic extraction & labeling...</small>
-                </div>
-                """, unsafe_allow_html=True)
-                
-                # Tahap 2C: Topic extraction (30% dari tahap 2)
-                for i in range(70, 100):
-                    processed_metric.metric("✓ Diproses", f"{len(docs):,}")
-                    progress_perc_metric.metric("% Progress", f"{((i+1)/100)*50:.1f}%")
-                    main_progress_bar.progress((25 + (i+1)/100 * 25) / 100)
-                    sub_progress_bar.progress((i+1-70)/30)
-                    elapsed = time.time() - start_time
-                    time_info.write(f"⏱️ Waktu elapsed: {elapsed:.1f}s")
-                    time.sleep(0.05)
-                
-                detail_text.write("""
-                <div style="padding: 10px; background-color: #d4edda; border-radius: 5px; border-left: 4px solid #28a745;">
-                    <small><b>✅ Tahap 2 Selesai!</b></small><br>
-                    <small>• Embedding documents... ✓</small><br>
-                    <small>• Clustering & reducing dimensions... ✓</small><br>
-                    <small>• Topic extraction & labeling... ✓</small>
-                </div>
-                """, unsafe_allow_html=True)
-                
-                processed_metric.metric("✓ Diproses", f"{len(docs):,}")
-                progress_perc_metric.metric("% Progress", "50%")
-                status_metric.metric("Status", "Fit-Transform Selesai")
+                    status_metric.metric("Status", "Embedding...")
+                with col3:
+                    topics_metric = st.empty()
+                    topics_metric.metric("🏷️ Topik", "Detecting...")
+                with col4:
+                    time_metric = st.empty()
+                    time_metric.metric("⏱️ Progress", "0%")
                 
                 # Jalankan actual fit_transform
+                fit_start = time.time()
                 topics, probs = cached_fit_transform(topic_model, docs)
+                fit_duration = time.time() - fit_start
                 
-                # Update session state with fitted model
+                # Update metrics
                 st.session_state['topic_model'] = topic_model
-                
-                # Assign topics to posts_df
                 posts_df['Topik'] = topics
+                num_topics = len(set(topics)) - (1 if -1 in set(topics) else 0)
                 
-                st.markdown("---")
+                total_docs_metric.metric("📚 Total Dokumen", f"{len(docs):,}")
+                status_metric.metric("Status", "Fit-Transform ✓")
+                topics_metric.metric("🏷️ Topik", f"{num_topics}")
+                time_metric.metric("⏱️ Waktu", f"{fit_duration:.1f}s")
+                
+                st.toast(f"✅ Fit-transform selesai! {num_topics} topik ditemukan dalam {fit_duration:.1f}s", icon="📊")
                 
                 # Progress 3: Topics Over Time
-                status_text.text("🔄 Tahap 3/4: Menghitung Topics Over Time...")
+                st.markdown("---")
+                status_text.info("🔄 Tahap 3/4: Menghitung evolusi topik seiring waktu...")
                 progress_bar.progress(0.75)
+                
+                tot_start = time.time()
                 logging.info("Calculating topics over time")
                 topics_over_time = cached_topics_over_time(topic_model, docs, timestamps, _nr_bins=20)
+                tot_duration = time.time() - tot_start
+                
+                st.toast(f"✅ Topics over time calculated dalam {tot_duration:.1f}s", icon="📈")
                 
                 # Progress 4: Complete
-                status_text.text("✅ Tahap 4/4: Selesai!")
+                total_duration = time.time() - topic_modeling_start
+                status_text.success(f"✅ Tahap 4/4: Topic Modeling Selesai! (Total: {total_duration:.1f}s)")
                 progress_bar.progress(1.0)
-
-            st.success("✅ Topic Modeling Selesai!")
+                st.toast(f"🎉 Topic modeling selesai! Total waktu: {total_duration:.1f}s", icon="🎉")
 
             # ========== APPLY FILTERS TO DATA ==========
             if st.session_state.get('filters_applied', False):
@@ -1099,55 +1074,92 @@ if uploaded_file:
             
             logging.info(f"Starting stance analysis on {len(comments_list)} comments with batch size {batch_size}")
             
-            # Progress bar with percentage
-            progress_bar = st.progress(0.0, text="🔄 Memulai analisis stance...")
-            status_placeholder = st.empty()
+            # Container for stance analysis progress
+            stance_analysis_container = st.container()
             
-            # Tips placeholder
-            tips_placeholder = st.empty()
-            tips_messages = [
-                "🤖 Model IndoBERT sedang menganalisis sentimen pro dan kontra...",
-                "📊 Mendeteksi opini masyarakat terhadap kebijakan luar negeri...",
-                "⚡ Hampir selesai, sedang menyusun hasil analisis...",
-                "✅ Analisis stance selesai! Menampilkan hasil..."
-            ]
-            
-            comments_df['sentiment'] = None
-            comments_df['confidence'] = None
-            
-            # Use cached stance analysis with progress updates
-            total_comments = len(comments_list)
-            processed = 0
-            
-            with st.spinner('🤖 Sedang membedah opini masyarakat...'):
-                sentiments, confidences = cached_stance_analysis(sentiment_model, comments_list, batch_size)
+            with stance_analysis_container:
+                st.subheader("🗣️ Stance Analysis pada Komentar")
                 
-                # Simulate progress updates (since cached function doesn't update UI)
-                for i in range(0, total_comments, batch_size):
-                    processed = min(i + batch_size, total_comments)
-                    progress = processed / total_comments
-                    progress_bar.progress(progress, text=f"🔄 Menganalisis {processed}/{total_comments} komentar...")
+                # Initialize progress components
+                progress_bar = st.progress(0, text="🔄 Memulai analisis stance...")
+                progress_metrics = st.columns([1, 1, 1, 1])
+                status_message = st.empty()
+                tips_placeholder = st.empty()
+                
+                # Progress metrics
+                with progress_metrics[0]:
+                    total_metric = st.empty()
+                    total_metric.metric("📝 Total Komentar", f"{len(comments_list):,}")
+                
+                with progress_metrics[1]:
+                    processed_metric = st.empty()
+                    processed_metric.metric("✓ Dianalisis", "0")
+                
+                with progress_metrics[2]:
+                    progress_perc_metric = st.empty()
+                    progress_perc_metric.metric("Progress", "0%")
+                
+                with progress_metrics[3]:
+                    batch_metric = st.empty()
+                    batch_metric.metric("🔄 Batch", "0/0")
+                
+                # Tips messages
+                tips_messages = [
+                    "🤖 Model sedang menganalisis sentimen pro, netral, dan kontra...",
+                    "📊 Mendeteksi opini masyarakat terhadap kebijakan luar negeri...",
+                    "⚡ Mengolah batch komentar dengan model IndoBERT...",
+                    "🎯 Menghitung confidence scores untuk setiap prediksi...",
+                    "✅ Hampir selesai, sedang finalisasi hasil analisis..."
+                ]
+                
+                comments_df['sentiment'] = None
+                comments_df['confidence'] = None
+                
+                # Perform stance analysis
+                with st.spinner('🤖 Sedang membedah opini masyarakat...'):
+                    import time
+                    start_time = time.time()
+                    sentiments, confidences = cached_stance_analysis(sentiment_model, comments_list, batch_size)
                     
-                    # Update tips
-                    tip_idx = min(int(progress * len(tips_messages)), len(tips_messages) - 1)
-                    tips_placeholder.info(tips_messages[tip_idx])
+                    # Update UI with actual batch progress
+                    total_batches = (len(comments_list) + batch_size - 1) // batch_size
                     
-                    # Small delay to show progress
-                    time.sleep(0.1)
-            
-            # Final updates
-            progress_bar.progress(1.0, text="✅ Analisis stance selesai!")
-            status_placeholder.success("✅ Analisis Stance Selesai!")
-            tips_placeholder.empty()
-            st.toast('Stance analysis completed!', icon='✅')
-            
-            # Assign results to dataframe
-            for i in range(len(sentiments)):
-                comments_df.loc[i, 'sentiment'] = sentiments[i]
-                comments_df.loc[i, 'confidence'] = confidences[i]
-            
-            logging.info("Completed stance analysis")
-            st.success("✅ Analisis Stance Selesai!")
+                    for batch_num in range(total_batches):
+                        start_idx = batch_num * batch_size
+                        end_idx = min((batch_num + 1) * batch_size, len(comments_list))
+                        processed = end_idx
+                        
+                        # Calculate progress
+                        progress = processed / len(comments_list)
+                        percent = int(progress * 100)
+                        
+                        # Update metrics
+                        processed_metric.metric("✓ Dianalisis", f"{processed:,}")
+                        progress_perc_metric.metric("Progress", f"{percent}%")
+                        batch_metric.metric("🔄 Batch", f"{batch_num + 1}/{total_batches}")
+                        progress_bar.progress(progress, text=f"🔄 Menganalisis {processed}/{len(comments_list)} komentar ({percent}%)...")
+                        
+                        # Update tips based on progress
+                        tip_idx = min(int(progress * len(tips_messages)), len(tips_messages) - 1)
+                        tips_placeholder.info(tips_messages[tip_idx])
+                
+                # Final updates
+                elapsed_time = time.time() - start_time
+                progress_bar.progress(1.0, text="✅ Analisis stance selesai!")
+                processed_metric.metric("✓ Dianalisis", f"{len(comments_list):,}")
+                progress_perc_metric.metric("Progress", "100%")
+                batch_metric.metric("⏱️ Waktu", f"{elapsed_time:.1f}s")
+                status_message.success("✅ Analisis Stance Selesai!")
+                tips_placeholder.empty()
+                st.toast(f'✅ Stance analysis selesai! ({len(comments_list):,} komentar dalam {elapsed_time:.1f}s)', icon='✅')
+                
+                # Assign results to dataframe
+                for i in range(len(sentiments)):
+                    comments_df.loc[i, 'sentiment'] = sentiments[i]
+                    comments_df.loc[i, 'confidence'] = confidences[i]
+                
+                logging.info(f"Completed stance analysis in {elapsed_time:.1f}s")
+                st.success("✅ Analisis Stance Selesai!")
             
             st.subheader("📋 Hasil Stance Analysis (20 Data Teratas)")
             st.dataframe(filtered_comments_df.head(20), use_container_width=True)
